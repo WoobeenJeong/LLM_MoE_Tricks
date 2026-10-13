@@ -16,8 +16,6 @@ blocks.
 
 ![architecture](docs/architecture.png)
 
-*(redraw with `python docs/make_architecture.py`)*
-
 Every box above is one YAML key, and every axis is independent - so the search
 space is the product of these columns:
 
