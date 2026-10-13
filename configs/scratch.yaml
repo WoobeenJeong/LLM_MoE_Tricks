@@ -1,0 +1,110 @@
+# Train everything at once: experts + gate + joint classifier, from scratch.
+#   python run_moe.py configs/scratch.yaml
+#
+# Add a view by adding one entry under data.omics AND one under
+# model.experts with the same name - nothing else changes.
+
+run:
+  name: moe_scratch
+  out_dir: /storm/User/jwb419/model_own/result/scratch
+  seed: 42
+  objective: auc            # auc | auc_ap | auc_youden
+  gpu: null                 # null = first cuda device if there is one
+  threads: 8
+  log_every: 25             # epochs between loss lines of the final refit
+
+data:
+  meta: /path/to/meta.parquet
+  id_col: library           # one meta row = one modelled observation
+  subject_col: sample       # repeated measurements (flowcell A/B) share it;
+                            # drop it and every row becomes its own subject
+  label_col: label
+  split_col: split          # development | external
+  fold_col: fold            # cross-validation fold, fixed in the meta
+  keep_meta_cols: [batch, sample_type]   # carried along for the result tables
+  omics:
+    OMICS_01:
+      path: /path/to/omics_01.parquet
+      index_col: library    # the table's own key column
+      join_on: row_id       # row_id (per observation) | sample (per subject)
+      columns: null         # null = every numeric column
+    OMICS_02:
+      path: /path/to/omics_02.parquet
+      index_col: sample     # a per-subject view is broadcast onto both rows
+      join_on: sample
+      columns: null
+
+model:
+  num_classes: 1
+  gate:
+    type: attention         # sigmoid | softmax | gumbel | attention
+    init_temperature: 1.0   # learned from here on
+    hidden: 64              # attention gate only: per-view hidden size
+  experts:
+    OMICS_01:
+      arch: transformer     # mlp | cnn1d | transformer
+      token_dim: 16         # the flat vector is read as (input_dim/token_dim) tokens
+      d_model: 32
+      n_heads: 4
+      n_layers: 1
+      ff_mult: 2
+      pool: cls             # cls | mean
+      dropout: 0.1
+      lr: 3.0e-3            # this expert's own rate (a shared one rarely serves both)
+      unfreeze_last_n: -1   # -1 = fully trainable (the from-scratch case)
+    OMICS_02:
+      arch: mlp
+      hidden_dims: [128, 64]
+      activation: relu      # relu | tanh | mish | silu | gelu | selu
+      batch_norm: true
+      dropout: 0.25
+      lr: 6.0e-4
+      unfreeze_last_n: -1
+
+loss:
+  # task: bce | wbce | focal | triplet
+  #   wbce     pos_weight defaults to n_neg/n_pos of the training labels
+  #            (give `pos_weight:` to fix it); use it INSTEAD of balanced_sampler
+  #   triplet  also keeps a BCE term, see `bce_weight`
+  task: {name: bce, weight: 1.0}
+  # gate regularisers, all minimised.  Deliberately WEAK: at a scale of ~1 they
+  # dwarf a task loss of ~0.1 and pin every sample at a uniform gate.
+  gate:
+    auxiliary: 0.0          # load balancing, N * sum(f_i * P_i)
+    importance: 0.03        # anti-collapse, keeps the global expert mix even
+    entropy: 0.01           # lets the gate commit per sample
+  # repeated-measure losses on the gate-weighted joint representation; they need
+  # subject_col, and are 0 when a batch holds no replicate pair.
+  representation:
+    name: ntxent            # ntxent | barlow_twins | vicreg
+    weight: 0.1
+    temperature: 0.05       # ntxent
+    # lambd: 5.0e-3                                 # barlow_twins
+    # sim_coef: 25.0 ; std_coef: 25.0 ; cov_coef: 1.0  # vicreg
+
+train:
+  epochs: 100
+  batch_size: 32            # subjects per batch, not rows
+  lr: 1.0e-3                # gate + classifier (and any expert without its own lr)
+  expert_lr_scale: 1.0      # scales every expert lr at once; 0 freezes them all
+  weight_decay: 1.0e-4
+  clip_grad: 1.0
+  balanced_sampler: true
+
+optimize:
+  enabled: false
+  n_trials: 30
+  # any dotted config path becomes a search dimension
+  space:
+    train.lr: {type: float, low: 1.0e-5, high: 3.0e-3, log: true}
+    train.epochs: {type: int, low: 30, high: 100, step: 10}
+    train.batch_size: {type: categorical, choices: [16, 32, 64]}
+    model.gate.type: {type: categorical, choices: [sigmoid, softmax, gumbel, attention]}
+    loss.task.name: {type: categorical, choices: [bce, wbce, focal]}
+    model.gate.init_temperature: {type: float, low: 0.3, high: 2.0}
+    model.experts.OMICS_01.arch: {type: categorical, choices: [transformer, cnn1d]}
+    model.experts.OMICS_02.arch: {type: categorical, choices: [mlp, cnn1d]}
+    loss.gate.importance: {type: categorical, choices: [0.0, 0.01, 0.03, 0.1]}
+    loss.gate.entropy: {type: categorical, choices: [0.0, 0.01, 0.03, 0.1]}
+    loss.representation.name: {type: categorical, choices: [ntxent, barlow_twins, vicreg]}
+    loss.representation.weight: {type: float, low: 0.0, high: 0.5, step: 0.05}
