@@ -1,0 +1,100 @@
+# Experts already exist as .pth; only the gate / classifier (plus however many
+# last layers of each expert you unfreeze) are trained.
+#   python run_moe.py configs/pretrained_gate.yaml
+#
+# model.experts.<view>.pretrained accepts a TorchScript file, a pickled module,
+# or a {"state_dict": ...} bundle - a state_dict is rebuilt into `arch`, so the
+# architecture keys below must then match the saved model.
+#
+# unfreeze_last_n   0  fully frozen, the gate learns alone
+#                   n  the last n parameter-owning sub-modules keep learning
+#                  -1  the whole expert keeps learning (fine-tuning)
+# train.expert_lr_scale scales every expert rate at once; 0 freezes them all
+# regardless of unfreeze_last_n, which is the cheapest gate-only ablation.
+
+run:
+  name: moe_gate_only
+  out_dir: /storm/User/jwb419/model_own/result/pretrained_gate
+  seed: 42
+  objective: auc
+  gpu: null
+  threads: 8
+  log_every: 25
+
+data:
+  meta: /path/to/meta.parquet
+  id_col: library
+  subject_col: sample
+  label_col: label
+  split_col: split
+  fold_col: fold
+  keep_meta_cols: [batch, sample_type]
+  omics:
+    OMICS_01:
+      path: /path/to/omics_01.parquet
+      index_col: library
+      join_on: row_id
+    OMICS_02:
+      path: /path/to/omics_02.parquet
+      index_col: sample
+      join_on: sample
+
+model:
+  num_classes: 1
+  gate:
+    type: attention         # sigmoid | softmax | gumbel | attention
+    init_temperature: 1.0
+    hidden: 64
+  experts:
+    OMICS_01:
+      arch: transformer
+      token_dim: 16
+      d_model: 32
+      n_heads: 4
+      n_layers: 1
+      pool: cls
+      pretrained: /path/to/expert_OMICS_01.pth
+      unfreeze_last_n: 1
+      lr: 1.0e-4            # fine-tuning rate for the unfrozen tail
+    OMICS_02:
+      arch: mlp
+      hidden_dims: [128, 64]
+      activation: relu
+      batch_norm: true
+      pretrained: /path/to/expert_OMICS_02.pth
+      unfreeze_last_n: 0    # frozen
+      lr: 1.0e-4
+
+loss:
+  task: {name: wbce, weight: 1.0}   # bce | wbce | focal | triplet
+  gate:
+    auxiliary: 0.0
+    importance: 0.03
+    entropy: 0.01
+  representation:
+    name: ntxent
+    weight: 0.1
+    temperature: 0.05
+
+train:
+  epochs: 60
+  batch_size: 32
+  lr: 1.0e-3                # the gate / classifier, trained from scratch
+  expert_lr_scale: 1.0
+  weight_decay: 1.0e-4
+  clip_grad: 1.0
+  balanced_sampler: true
+
+optimize:
+  enabled: false
+  n_trials: 30
+  space:
+    train.lr: {type: float, low: 1.0e-4, high: 1.0e-2, log: true}
+    train.epochs: {type: int, low: 20, high: 80, step: 10}
+    train.expert_lr_scale: {type: categorical, choices: [0.0, 0.3, 1.0]}
+    model.gate.type: {type: categorical, choices: [sigmoid, softmax, gumbel, attention]}
+    model.experts.OMICS_01.unfreeze_last_n: {type: categorical, choices: [0, 1, 2, 3]}
+    model.experts.OMICS_02.unfreeze_last_n: {type: categorical, choices: [0, 1, 2, 3]}
+    loss.gate.importance: {type: categorical, choices: [0.0, 0.01, 0.03, 0.1]}
+    loss.gate.entropy: {type: categorical, choices: [0.0, 0.01, 0.03, 0.1]}
+    loss.representation.weight: {type: float, low: 0.0, high: 0.5, step: 0.05}
