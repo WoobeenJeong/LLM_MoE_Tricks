@@ -16,46 +16,9 @@ blocks.
 
 ## What you can combine
 
-```mermaid
-flowchart LR
-    subgraph IN[" "]
-        X1["OMICS_01<br/>(n x d1)"]
-        X2["OMICS_02<br/>(n x d2)"]
-        XN["OMICS_N<br/>(n x dN)"]
-    end
+![architecture](docs/architecture.png)
 
-    subgraph EXPERTS["experts - one per view"]
-        E1["arch: mlp | cnn1d | transformer<br/>init: scratch | pretrained .pth<br/>unfreeze_last_n: -1 | 0 | n<br/>own lr"]
-        E2["arch: mlp | cnn1d | transformer<br/>init: scratch | pretrained .pth<br/>unfreeze_last_n: -1 | 0 | n<br/>own lr"]
-        EN["..."]
-    end
-
-    subgraph GATE["gate - sees the RAW views"]
-        G["sigmoid | softmax<br/>gumbel | attention<br/>learned temperature"]
-    end
-
-    X1 --> E1
-    X2 --> E2
-    XN --> EN
-    X1 & X2 & XN -.LayerNorm.-> G
-
-    E1 --> H1["LayerNorm"]
-    E2 --> H2["LayerNorm"]
-    EN --> HN["LayerNorm"]
-
-    G -- "w1" --> H1
-    G -- "w2" --> H2
-    G -- "wN" --> HN
-
-    H1 & H2 & HN --> R["joint representation<br/>concat(w_i * h_i)"]
-    R --> C["linear classifier"] --> P["logit"]
-
-    P -.-> L1["task loss<br/>bce | wbce | focal | triplet"]
-    G -.-> L2["gate loss<br/>auxiliary + importance + entropy"]
-    R -.-> L3["representation loss<br/>over replicate pairs<br/>ntxent | barlow_twins | vicreg"]
-
-    style IN fill:none,stroke:none
-```
+*(redraw with `python docs/make_architecture.py`)*
 
 Every box above is one YAML key, and every axis is independent - so the search
 space is the product of these columns:
