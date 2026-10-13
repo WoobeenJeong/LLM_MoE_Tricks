@@ -31,6 +31,10 @@ space is the product of these columns:
 | representation loss | `ntxent` · `barlow_twins` · `vicreg`, weighted | `loss.representation` |
 | per-expert learning rate | one rate per view, or `expert_lr_scale: 0` to freeze all | `model.experts.<view>.lr` |
 
+## Experiment
+
+![experiment](docs/experiment.png)
+
 Any dotted path in that table can be handed to optuna instead of being fixed:
 
 ```yaml
