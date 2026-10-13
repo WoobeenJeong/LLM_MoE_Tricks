@@ -255,19 +255,3 @@ The point of a gate is that it is readable. What a run already leaves behind:
 - the trial table (`trials_metrics.tsv`) carries the mean gate weight per view
   alongside the score, which is how you catch a model that scores well *because*
   the gate stopped routing.
-
-Open questions this repo does not answer yet, in the order they are worth doing:
-
-1. **Gate weight vs clinical covariates** - if the gate's choice tracks stage,
-   tumour fraction or batch, that is either the biology or the confounder; both
-   are findings, and neither is visible from the AUC.
-2. **Per-view attribution inside the chosen expert** - the transformer expert's
-   attention over feature tokens, or SHAP on the MLP, conditioned on the gate
-   having picked that view.
-3. **Counterfactual routing** - force the gate to each expert in turn and record
-   how the prediction moves. A gate weight of 0.9 means little if the prediction
-   is identical at 0.1.
-4. **Stability of the routing** - the same patient measured twice (the replicate
-   pairs the representation losses already use) should route the same way. Gate
-   disagreement between flowcell A and B is a direct, label-free measure of how
-   much of the routing is technical noise.
