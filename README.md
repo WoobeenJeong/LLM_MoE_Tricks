@@ -1,4 +1,4 @@
-# MoE on Multi-omics
+# MoE Tricks
 
 Trials to use Mixture of Expert on Multi-omic features
 
