@@ -2,7 +2,9 @@
 
 Trials to use Mixture of Experts on multi-omic features.
 
-**Objective: not only SOTA, but also biologically & clinically explainable.**
+**Objective: not only SOTA, but also Explainable.**
+
+Omics = Dataset with Modality (in Biology)
 
 One config file decides the whole model: how many omics views there are, what
 each expert looks like, which gate structure routes them, and which losses are
