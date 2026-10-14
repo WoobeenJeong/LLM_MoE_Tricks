@@ -261,6 +261,8 @@ fold-specific checkpoints. Nothing in the code can detect this for you.
 
 The point of a gate is that it is readable. What a run already leaves behind:
 
+<img src="docs/fig_gate_cancer.png" width="900">
+
 - `pred.npz` - per-row **gate weights** for every development row
   (out-of-fold, `dev_gate_oof`) and every external row (`ext_gate`), next to the
   predictions and labels. Which view carried which patient is a table, not a
@@ -273,5 +275,3 @@ The point of a gate is that it is readable. What a run already leaves behind:
 - the trial table (`trials_metrics.tsv`) carries the mean gate weight per view
   alongside the score, which is how you catch a model that scores well *because*
   the gate stopped routing.
-
-<img src="docs/fig_gate_cancer.png" width="900">
