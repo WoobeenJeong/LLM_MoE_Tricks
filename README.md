@@ -33,7 +33,6 @@ blocks.
 
 ## Experiment
 
-![experiment](docs/experiment.png)
 
 
 Any dotted path in that table can be handed to optuna instead of being fixed:
