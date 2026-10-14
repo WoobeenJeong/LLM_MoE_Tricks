@@ -94,8 +94,6 @@ copied onto both rows. Scores are averaged back to one value per subject.
 
 ## Consideration for loss as statistical approach
 
-Total objective, every weight set in the YAML:
-
 $$
 \mathcal{L}=\mathcal{L}_{\text{task}}
 +\lambda_{\text{aux}}\mathcal{L}_{\text{aux}}
@@ -106,119 +104,52 @@ $$
 
 ### [for gate]
 
-All three gate terms are **minimised**. They are deliberately small: at weight
-$\approx 1$ they are ten times the task loss and freeze every sample at
-$1/N$ - a gate that looks alive and says nothing.
+All three are **minimised**, and all three must stay small: at $\lambda\approx1$
+they are ten times the task loss and freeze every sample at $1/N$.
 
 <img src="docs/fig_gate_entropy.png" width="900">
 
-Write the batch-mean weight of view $i$ and its hard share as
+Mean weight of view $i$: $P_i=\tfrac1B\sum_n g_{ni}$. Share of samples routed
+to $i$: $f_i=\tfrac1B\sum_n\mathbf{1}[\arg\max_j g_{nj}=i]$.
 
-$$
-P_i=\frac{1}{B}\sum_n g_{ni},\qquad
-f_i=\frac{1}{B}\sum_n \mathbf{1}\!\left[\arg\max_j g_{nj}=i\right].
-$$
+| term | formula | what it buys |
+|---|---|---|
+| `auxiliary` | $N\sum_i f_iP_i\ \ (\ge1)$ | load balance; couples hard count to soft weight, so it keeps pushing |
+| `importance` | $\sum_i\left(P_i-\tfrac1N\right)^2$ | anti-collapse, smoother and weaker - start here |
+| `entropy` | $-\tfrac1B\sum_n\sum_i g_{ni}\log g_{ni}$ | lets each sample commit to one view |
 
-**auxiliary** (load balancing, Switch-Transformer):
-
-$$
-\mathcal{L}_{\text{aux}}=N\sum_{i} f_i P_i \;\;\ge 1,\quad =1 \text{ when balanced.}
-$$
-
-It multiplies the hard count by the soft probability, so it keeps pushing even
-when the average already looks even.
-
-**importance** (anti-collapse): squared distance of the mean weight from uniform,
-
-$$
-\mathcal{L}_{\text{imp}}=\sum_i\Big(P_i-\tfrac{1}{N}\Big)^2 .
-$$
-
-Smoother and weaker than `auxiliary`; the one to start with when $N$ is small.
-
-**entropy** (per-sample decisiveness):
-
-$$
-\mathcal{L}_{\text{ent}}=-\frac{1}{B}\sum_n\sum_i g_{ni}\log g_{ni}.
-$$
-
-Minimising it pushes each sample towards a one-hot route; `importance` keeps the
-cohort-level mix even. Use them **together**: entropy alone sends everyone to one
-expert, importance alone pins everyone at $1/N$. An earlier version *maximised*
-entropy - with importance on top, every sample sat at 50:50 (left panel above).
-
-For the `sigmoid` gate the weights are not a distribution, so entropy becomes the
-mean **binary** entropy per view and the balance terms use $g_{ni}/\sum_j g_{nj}$.
+Use `entropy` **with** a balance term: alone it sends everyone to one view, while
+`importance` alone pins everyone at $1/N$. Maximising entropy (a minus sign in
+front) is what froze the left panel at 50:50. For the `sigmoid` gate the weights
+are not a distribution, so entropy becomes per-view **binary** entropy and the
+balance terms use $g_{ni}/\sum_j g_{nj}$.
 
 ### [for feature]
 
-**bce / wbce** - binary cross-entropy, optionally weighted:
+| loss | formula | note |
+|---|---|---|
+| `bce` / `wbce` | $-\tfrac1B\sum_n\left[c\,y_n\log p_n+(1-y_n)\log(1-p_n)\right]$ | `wbce` sets $c=n_{\text{neg}}/n_{\text{pos}}$ |
+| `focal` | $-\tfrac1B\sum_n\alpha_t(1-p_t)^{\gamma}\log p_t$ | $p_t$ = probability of the true class; easy cases fade |
+| `triplet` | $\tfrac1B\sum_n\left[\max_{y_j=y_n}\lVert z_n-z_j\rVert-\min_{y_j\neq y_n}\lVert z_n-z_j\rVert+m\right]_+$ | shapes distances, not probability - keep a BCE term beside it |
 
-$$
-\mathcal{L}_{\text{bce}}=-\frac{1}{B}\sum_n \big[\,c\,y_n\log p_n+(1-y_n)\log(1-p_n)\big],\qquad
-c=\frac{n_{\text{neg}}}{n_{\text{pos}}}\ \text{for \texttt{wbce}} .
-$$
-
-**focal** - down-weights the easy cases by $(1-p_t)^\gamma$ with
-$p_t=p_n$ if $y_n=1$ else $1-p_n$:
-
-$$
-\mathcal{L}_{\text{focal}}=-\frac{1}{B}\sum_n \alpha_t(1-p_t)^{\gamma}\log p_t .
-$$
-
-**triplet** - batch-hard, using the label as the identity:
-
-$$
-\mathcal{L}_{\text{tri}}=\frac{1}{B}\sum_n\Big[\max_{y_j=y_n}\lVert z_n-z_j\rVert-\min_{y_j\neq y_n}\lVert z_n-z_j\rVert+m\Big]_+ ,\qquad m=\text{margin}.
-$$
-
-It shapes distances, not the decision value, so a BCE term rides along
-(`bce_weight`) to keep the probability calibrated.
-
-Imbalance: use **either** `balanced_sampler` (resamples subjects, replicates
-stay together) **or** `wbce`. Both at once corrects twice.
+Imbalance: `balanced_sampler` **or** `wbce`, not both.
 
 ### [for representation]
 
-Same subject measured twice: anything that moves between the two measurements is
-the assay, not the patient. All three act on $z_n$ and return exactly $0$ when a
-batch holds no pair. Let $z^A,z^B$ be the two measurements of one subject.
+The same subject measured twice: whatever moves between the two is the assay,
+not the patient. All three act on $z_n$, and are $0$ when a batch has no pair.
+$z^A,z^B$ are the two measurements.
 
 <img src="docs/fig_replicate.png" width="900">
 
-**NT-Xent** - the replicate is the positive, the rest of the batch negatives,
-with cosine similarity $s$ and temperature $\tau$:
+| loss | formula | one line |
+|---|---|---|
+| `ntxent` | $-\log\dfrac{\exp(s(z^A,z^B)/\tau)}{\sum_{m\neq A}\exp(s(z^A,z_m)/\tau)}$ | needs negatives, so small batches hurt |
+| `barlow_twins` | $\sum_i(1-C_{ii})^2+\lambda\sum_{i\neq j}C_{ij}^2$ | drives the cross-correlation $C$ to $I$; no negatives, fine at $n\sim100$ |
+| `vicreg` | $\alpha\lVert z^A-z^B\rVert^2+\beta\sum_k\left[1-\sqrt{\mathrm{Var}_k+\epsilon}\right]_++\gamma\sum_{k\neq l}\mathrm{Cov}_{kl}^2$ | the variance hinge pays it to stay spread out, so it resists collapse |
 
-$$
-\mathcal{L}_{\text{ntx}}=-\log\frac{\exp(s(z^A,z^B)/\tau)}{\sum_{m\neq A}\exp(s(z^A,z_m)/\tau)} .
-$$
-
-Needs negatives, so small batches hurt; it also pushes apart two patients who are
-genuinely alike.
-
-**Barlow Twins** - cross-correlation matrix $C$ of the two standardised
-measurements driven to the identity:
-
-$$
-\mathcal{L}_{\text{bt}}=\sum_i (1-C_{ii})^2+\lambda\sum_{i\neq j}C_{ij}^2 .
-$$
-
-No negatives, so batch size matters far less - the practical choice at $n\sim100$.
-
-**VICReg** - invariance + variance floor + decorrelation:
-
-$$
-\mathcal{L}_{\text{vic}}=\alpha\,\lVert z^A-z^B\rVert^2
-+\beta\sum_{k}\big[1-\sqrt{\operatorname{Var}(z^{\cdot}_k)+\epsilon}\,\big]_+
-+\gamma\sum_{k\neq l}\operatorname{Cov}(z^{\cdot})_{kl}^2 .
-$$
-
-The middle term is a hinge that *pays the model to stay spread out*, so VICReg
-resists the collapse that makes two measurements agree - visible as its wide
-scatter and low polarization in the figure.
-
-Rule of thumb: Barlow Twins or VICReg when replicates are the only structure you
-have, NT-Xent when the batch is big enough for negatives to mean something.
+Start with `barlow_twins` or `vicreg` when replicates are all the structure you
+have; `ntxent` once the batch is large enough for negatives to mean something.
 
 ---
 
@@ -226,34 +157,32 @@ have, NT-Xent when the batch is big enough for negatives to mean something.
 
 All four read the standardised, LayerNormed views and emit one weight per view.
 With $u_n=W[x_{n1}\Vert\cdots\Vert x_{nN}]+b$ and a learned temperature
-$\tau=\operatorname{softplus}(\theta)$:
+$\tau=\mathrm{softplus}(\theta)$:
 
 <img src="docs/fig_gate_structure.png" width="900">
 
 | gate | weight | reads as |
 |---|---|---|
-| `sigmoid` | $g_{ni}=\sigma(u_{ni}/\tau)$ | independent switches, $\sum_i g_{ni}\neq 1$ - a soft ensemble |
-| `softmax` | $g_{n}=\operatorname{softmax}(u_n/\tau)$ | a share out of 100% - the usual MoE, and the one that quotes cleanly |
-| `gumbel` | $g_n=\operatorname{softmax}((u_n+\varepsilon)/\tau)$, $\varepsilon\sim$ Gumbel (train only) | a near-discrete pick; the noise also regularises a small cohort |
-| `attention` | $c_{ni}=\tanh(W_ix_{ni})\odot\sigma(V_ix_{ni})$, then $g_n=\operatorname{softmax}(W_c[c_{n1}\Vert\cdots])$ | weighs *parts* of a view first - survives signal buried in thousands of features, at the cost of parameters |
+| `sigmoid` | $\sigma(u_{ni}/\tau)$ | independent switches, $\sum_i g_{ni}\neq1$ - a soft ensemble |
+| `softmax` | $\mathrm{softmax}(u_n/\tau)$ | a share of 100% - quotes cleanly |
+| `gumbel` | $\mathrm{softmax}((u_n+\varepsilon)/\tau)$, $\varepsilon\sim$Gumbel, train only | a near-discrete pick |
+| `attention` | $c_{ni}=\tanh(W_ix_{ni})\odot\sigma(V_ix_{ni})$, then softmax of $W_c[c_{n1}\Vert\cdots]$ | weighs parts of a view first; costs parameters |
 
-Choose by what you want to claim: `softmax` if the weight itself is the result,
-`gumbel` if you believe one view is right per patient, `sigmoid` if the views are
-complementary rather than competing, `attention` if a view is mostly noise.
+Pick by the claim: `softmax` if the weight is the result, `gumbel` if one view
+should win per patient, `sigmoid` if views complement rather than compete,
+`attention` if a view is mostly noise.
 
 ### gate for input feature vs hidden dimension
 
-**Implemented: input-feature gating**, $g_n=\text{gate}(x_n)$. The routing is a
-statement about the *data*, independent of how well each expert is trained, which
-is what makes the weight quotable - and the only option for a frozen expert.
+**Implemented:** $g_n=\text{gate}(x_n)$ - the routing describes the *data*, not
+the training state, so the weight is quotable and works with a frozen expert.
 
-**Hidden-dimension gating**, $g_n=\text{gate}(h_n)$, is the alternative: more
-informative, but gate and expert now train each other. A weak expert gets
-down-weighted, trains less, stays weak. *Not implemented*: feed `feats` to the
-gate in `MoE.forward_with_rep` and size `MoEGate` by `expert_output_dims`.
+**Not implemented:** $g_n=\text{gate}(h_n)$ - more informative, but gate and
+expert then train each other: a weak expert is down-weighted, trains less, stays
+weak. (One change in `MoE.forward_with_rep` plus `expert_output_dims`.)
 
-Baseline worth keeping: **no gate** (plain concatenation). If the gate does not
-beat it, the gate is decoration.
+Keep **no gate** (plain concatenation) as the baseline; if the gate does not beat
+it, the gate is decoration.
 
 ---
 
@@ -264,25 +193,23 @@ beat it, the gate is decoration.
 Four ways to pick the next trial $x^{(t)}$ from the search space $\mathcal{X}$,
 given the trials already scored, $\mathcal{D}=\{(x^{(s)},y^{(s)})\}_{s<t}$:
 
-| sampler | what it assumes / samples from | in one line |
+| sampler | samples from | in one line |
 |---|---|---|
-| `Random` | $x^{(t)}\sim\mathrm{Uniform}(\mathcal{X})$, independent of $\mathcal{D}$ | no model at all - covers the box evenly, never zooms in |
-| `TPE` | splits trials at a quantile $y^\ast$ and fits two densities, $\ell(x)=p(x\mid y>y^\ast)$ and $g(x)=p(x\mid y\le y^\ast)$; samples where $\ell(x)/g(x)$ is large | density ratio, not a surface - cheap, and it concentrates fast |
-| `GP` | $f\sim\mathcal{GP}(\mu,k)$, so the posterior gives $\mu_t(x)$ and $\sigma_t(x)$; picks $\arg\max_x \mathbb{E}\big[(f(x)-f^\ast)_+\big]$ | one smooth surface with error bars - spends trials on the corners it has not seen |
-| `CmaEs` | $x^{(t)}\sim\mathcal{N}\!\left(m_t,\sigma_t^2 C_t\right)$, with $m_t,C_t$ re-estimated from the best trials | an ellipse that walks downhill - tight, and blind to anything outside it |
+| `Random` | $\mathrm{Uniform}(\mathcal{X})$, ignores $\mathcal{D}$ | no model - even cover, never zooms in |
+| `TPE` | $\ell(x)/g(x)$ large, with $\ell=p(x\mid y>y^\ast)$, $g=p(x\mid y\le y^\ast)$ | a density ratio, not a surface - concentrates fast |
+| `GP` | $\arg\max_x\mathbb{E}[(f(x)-f^\ast)_+]$ under $f\sim\mathcal{GP}(\mu,k)$ | a surface with error bars - pays to visit unseen corners |
+| `CmaEs` | $\mathcal{N}(m_t,\sigma_t^2C_t)$, $m_t,C_t$ from the best trials | an ellipse walking downhill - blind outside it |
 
-The density panels show exactly that: `Random` fills the box, `TPE` collapses
-onto one peak, `GP` keeps probing the edges, `CmaEs` draws one elongated cloud.
-Best objective was reached by `GP` on OMICS1 and by `TPE` on OMICS2 - with 42
-trials the ranking is not stable enough to call a winner.
+The panels show it: `Random` fills the box, `TPE` collapses onto one peak, `GP`
+keeps probing edges, `CmaEs` draws one elongated cloud. Best objective: `GP` on
+OMICS1, `TPE` on OMICS2 - 42 trials is too few to call a winner.
 
 ---
 
 ## Consideration for expert (+ transfer learning)
 
-Experts are built from scratch or loaded from a `.pth` (TorchScript, pickled
-module, or `state_dict`). A loaded expert can stay frozen, open partly, or
-fine-tune whole.
+An expert is built from scratch or loaded from a `.pth` (TorchScript, pickled
+module, or `state_dict`), then kept frozen, opened partly, or fine-tuned whole.
 
 ### how many layers should be open / freeze
 
@@ -295,20 +222,15 @@ fine-tune whole.
 | larger `n` | deeper adaptation | the input distribution itself shifted (assay, depth) |
 | `-1` | everything trains | enough data, or the weights are only an initialisation |
 
-What the code enforces so the choice means what you think:
+So the choice means what you think: a frozen expert sits in **eval mode**
+(dropout and BatchNorm statistics stop moving), frozen parameters get **no
+optimiser group** (weight decay cannot shrink them), and each expert keeps **its
+own learning rate**. `train.expert_lr_scale: 0` freezes all experts at once - the
+cheapest "is the gate doing anything?" ablation.
 
-- a frozen expert sits in **eval mode** - its dropout and BatchNorm statistics
-  stop moving while "only the gate learns";
-- frozen parameters get **no optimiser group** - weight decay cannot shrink them;
-- each expert keeps **its own learning rate**; a tail being fine-tuned usually
-  wants an order of magnitude less than a gate trained from scratch.
-
-`train.expert_lr_scale: 0` freezes every expert at once - the cheapest "is the
-gate doing anything?" ablation.
-
-**Leakage warning.** An expert pretrained on the whole development set has
-already seen the held-out fold. Either pretrain outside the cohort, or keep
-fold-specific checkpoints. The code cannot detect this.
+**Leakage.** An expert pretrained on the whole development set has already seen
+the held-out fold. Pretrain outside the cohort, or keep fold-specific
+checkpoints; the code cannot detect this.
 
 ---
 
