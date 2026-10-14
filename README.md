@@ -48,6 +48,8 @@ optimize:
     loss.representation.weight: {type: float, low: 0.0, high: 0.5, step: 0.05}
 ```
 
+<img src="docs/fig_sampler_space.png" width="900">
+
 ---
 
 ## Run
