@@ -35,6 +35,12 @@ blocks.
 
 ![experiment](docs/experiment.png)
 
+<img src="docs/fig_gate_entropy.png" width="900">
+
+<img src="docs/fig_gate_structure.png" width="900">
+
+<img src="docs/fig_replicate.png" width="900">
+
 Any dotted path in that table can be handed to optuna instead of being fixed:
 
 ```yaml
