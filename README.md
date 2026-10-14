@@ -261,7 +261,20 @@ beat it, the gate is decoration.
 
 <img src="docs/fig_sampler_space.png" width="900">
 
-**Will edit soon**
+Four ways to pick the next trial $x^{(t)}$ from the search space $\mathcal{X}$,
+given the trials already scored, $\mathcal{D}=\{(x^{(s)},y^{(s)})\}_{s<t}$:
+
+| sampler | what it assumes / samples from | in one line |
+|---|---|---|
+| `Random` | $x^{(t)}\sim\mathrm{Uniform}(\mathcal{X})$, independent of $\mathcal{D}$ | no model at all - covers the box evenly, never zooms in |
+| `TPE` | splits trials at a quantile $y^\ast$ and fits two densities, $\ell(x)=p(x\mid y>y^\ast)$ and $g(x)=p(x\mid y\le y^\ast)$; samples where $\ell(x)/g(x)$ is large | density ratio, not a surface - cheap, and it concentrates fast |
+| `GP` | $f\sim\mathcal{GP}(\mu,k)$, so the posterior gives $\mu_t(x)$ and $\sigma_t(x)$; picks $\arg\max_x \mathbb{E}\big[(f(x)-f^\ast)_+\big]$ | one smooth surface with error bars - spends trials on the corners it has not seen |
+| `CmaEs` | $x^{(t)}\sim\mathcal{N}\!\left(m_t,\sigma_t^2 C_t\right)$, with $m_t,C_t$ re-estimated from the best trials | an ellipse that walks downhill - tight, and blind to anything outside it |
+
+The density panels show exactly that: `Random` fills the box, `TPE` collapses
+onto one peak, `GP` keeps probing the edges, `CmaEs` draws one elongated cloud.
+Best objective was reached by `GP` on OMICS1 and by `TPE` on OMICS2 - with 42
+trials the ranking is not stable enough to call a winner.
 
 ---
 
