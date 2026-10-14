@@ -35,11 +35,6 @@ blocks.
 
 ![experiment](docs/experiment.png)
 
-<img src="docs/fig_gate_entropy.png" width="900">
-
-<img src="docs/fig_gate_structure.png" width="900">
-
-<img src="docs/fig_replicate.png" width="900">
 
 Any dotted path in that table can be handed to optuna instead of being fixed:
 
@@ -98,6 +93,8 @@ The three gate terms are all **minimised** and all deliberately weak: at a scale
 of ~1 they dwarf a task loss of ~0.1 and pin every sample at a uniform gate,
 which looks like a working gate and is in fact a dead one.
 
+<img src="docs/fig_gate_entropy.png" width="900">
+
 **auxiliary loss** - the Switch-Transformer load balancer,
 `N * sum_i f_i * P_i`, where `f_i` is the fraction of samples whose top expert
 is `i` and `P_i` the mean gate probability of `i`. It is 1.0 at perfect balance.
@@ -141,6 +138,8 @@ measuring the library, not the patient. All three are computed on the
 gate-weighted joint representation and return exactly 0 when a batch holds no
 replicate pair.
 
+<img src="docs/fig_replicate.png" width="900">
+
 **NT-Xent** - contrastive: the replicate is the positive, every other sample in
 the batch a negative. Needs negatives, so it fights the task loss when batches
 are small; it also pulls apart two patients who genuinely look alike.
@@ -165,6 +164,8 @@ mean something.
 
 All four take the (standardised, LayerNormed) views and emit one weight per
 expert, with a learned temperature.
+
+<img src="docs/fig_gate_structure.png" width="900">
 
 **sigmoid** - one linear layer, an *independent* weight per expert. The weights
 do not sum to 1, so experts can be on or off together: a soft ensemble, not a
