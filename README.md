@@ -130,7 +130,7 @@ balance terms use $g_{ni}/\sum_j g_{nj}$.
 |---|---|---|
 | `bce` / `wbce` | $-\tfrac1B\sum_n\left[c\,y_n\log p_n+(1-y_n)\log(1-p_n)\right]$ | `wbce` sets $c=n_{\text{neg}}/n_{\text{pos}}$ |
 | `focal` | $-\tfrac1B\sum_n\alpha_t(1-p_t)^{\gamma}\log p_t$ | $p_t$ = probability of the true class; easy cases fade |
-| `triplet` | $\tfrac1B\sum_n\left[\max_{y_j=y_n}\lVert z_n-z_j\rVert-\min_{y_j\neq y_n}\lVert z_n-z_j\rVert+m\right]_+$ | shapes distances, not probability - keep a BCE term beside it |
+| `triplet` | $\tfrac1B\sum_n\max(0,\ \max_{y_j=y_n}\lVert z_n-z_j\rVert-\min_{y_j\neq y_n}\lVert z_n-z_j\rVert+m)$ | shapes distances, not probability - keep a BCE term beside it |
 
 Imbalance: `balanced_sampler` **or** `wbce`, not both.
 
@@ -146,7 +146,7 @@ $z^A,z^B$ are the two measurements.
 |---|---|---|
 | `ntxent` | $-\log\dfrac{\exp(s(z^A,z^B)/\tau)}{\sum_{m\neq A}\exp(s(z^A,z_m)/\tau)}$ | needs negatives, so small batches hurt |
 | `barlow_twins` | $\sum_i(1-C_{ii})^2+\lambda\sum_{i\neq j}C_{ij}^2$ | drives the cross-correlation $C$ to $I$; no negatives, fine at $n\sim100$ |
-| `vicreg` | $\alpha\lVert z^A-z^B\rVert^2+\beta\sum_k\left[1-\sqrt{\mathrm{Var}_k+\epsilon}\right]_++\gamma\sum_{k\neq l}\mathrm{Cov}_{kl}^2$ | the variance hinge pays it to stay spread out, so it resists collapse |
+| `vicreg` | $\alpha\lVert z^A-z^B\rVert^2+\beta\sum_k\max(0,1-\sqrt{\mathrm{Var}_k+\epsilon})+\gamma\sum_{k\neq l}\mathrm{Cov}_{kl}^2$ | the variance hinge pays it to stay spread out, so it resists collapse |
 
 Start with `barlow_twins` or `vicreg` when replicates are all the structure you
 have; `ntxent` once the batch is large enough for negatives to mean something.
@@ -165,7 +165,7 @@ $\tau=\mathrm{softplus}(\theta)$:
 |---|---|---|
 | `sigmoid` | $\sigma(u_{ni}/\tau)$ | independent switches, $\sum_i g_{ni}\neq1$ - a soft ensemble |
 | `softmax` | $\mathrm{softmax}(u_n/\tau)$ | a share of 100% - quotes cleanly |
-| `gumbel` | $\mathrm{softmax}((u_n+\varepsilon)/\tau)$, $\varepsilon\sim$Gumbel, train only | a near-discrete pick |
+| `gumbel` | $\mathrm{softmax}((u_n+\varepsilon)/\tau)$ with $\varepsilon\sim\mathrm{Gumbel}$, train only | a near-discrete pick |
 | `attention` | $c_{ni}=\tanh(W_ix_{ni})\odot\sigma(V_ix_{ni})$, then softmax of $W_c[c_{n1}\Vert\cdots]$ | weighs parts of a view first; costs parameters |
 
 Pick by the claim: `softmax` if the weight is the result, `gumbel` if one view
@@ -197,7 +197,7 @@ given the trials already scored, $\mathcal{D}=\{(x^{(s)},y^{(s)})\}_{s<t}$:
 |---|---|---|
 | `Random` | $\mathrm{Uniform}(\mathcal{X})$, ignores $\mathcal{D}$ | no model - even cover, never zooms in |
 | `TPE` | $\ell(x)/g(x)$ large, with $\ell=p(x\mid y>y^\ast)$, $g=p(x\mid y\le y^\ast)$ | a density ratio, not a surface - concentrates fast |
-| `GP` | $\arg\max_x\mathbb{E}[(f(x)-f^\ast)_+]$ under $f\sim\mathcal{GP}(\mu,k)$ | a surface with error bars - pays to visit unseen corners |
+| `GP` | $\arg\max_x\mathbb{E}[\max(0,f(x)-f^\ast)]$ under $f\sim\mathcal{GP}(\mu,k)$ | a surface with error bars - pays to visit unseen corners |
 | `CmaEs` | $\mathcal{N}(m_t,\sigma_t^2C_t)$, $m_t,C_t$ from the best trials | an ellipse walking downhill - blind outside it |
 
 The panels show it: `Random` fills the box, `TPE` collapses onto one peak, `GP`
@@ -208,44 +208,35 @@ OMICS1, `TPE` on OMICS2 - 42 trials is too few to call a winner.
 
 ## Consideration for expert (+ transfer learning)
 
-An expert is built from scratch or loaded from a `.pth` (TorchScript, pickled
-module, or `state_dict`), then kept frozen, opened partly, or fine-tuned whole.
+An expert is built from scratch or loaded from a `.pth`, then frozen, opened
+partly, or fine-tuned whole. `unfreeze_last_n` counts parameter-owning
+sub-modules from the output end:
 
-### how many layers should be open / freeze
-
-`unfreeze_last_n` counts **parameter-owning sub-modules from the output end**:
-
-| value | effect | when |
+| value | trains | use when |
 |---|---|---|
-| `0` | frozen; only gate + classifier learn | the expert saw far more data than this cohort; you want the gate's contribution isolated |
-| `1`–`2` | head (and last block) adapt | the representation transfers, the decision boundary does not - the usual cross-site case |
-| larger `n` | deeper adaptation | the input distribution itself shifted (assay, depth) |
-| `-1` | everything trains | enough data, or the weights are only an initialisation |
+| `0` | gate + classifier only | the expert saw far more data than this cohort |
+| `1`–`2` | head, last block | representation transfers, decision boundary does not |
+| larger `n` | deeper | the input distribution itself shifted |
+| `-1` | everything | enough data, or the weights are just an init |
 
-So the choice means what you think: a frozen expert sits in **eval mode**
-(dropout and BatchNorm statistics stop moving), frozen parameters get **no
-optimiser group** (weight decay cannot shrink them), and each expert keeps **its
-own learning rate**. `train.expert_lr_scale: 0` freezes all experts at once - the
-cheapest "is the gate doing anything?" ablation.
+A frozen expert stays in eval mode and gets no optimiser group, so its BatchNorm
+statistics and weights really do not move. Each expert keeps its own learning
+rate; `train.expert_lr_scale: 0` freezes them all at once.
 
-**Leakage.** An expert pretrained on the whole development set has already seen
-the held-out fold. Pretrain outside the cohort, or keep fold-specific
-checkpoints; the code cannot detect this.
+**Leakage:** an expert pretrained on the whole development set has already seen
+the held-out fold. Pretrain outside the cohort or keep fold-specific checkpoints.
 
 ---
 
 ## Consideration for explainability
 
-A gate is worth having only if it is readable. What one run leaves behind:
+A gate is worth having only if it is readable. Every run leaves:
 
 <img src="docs/fig_gate_cancer.png" width="900">
 
-- `pred.npz` - per-row **gate weights**, out-of-fold (`dev_gate_oof`) and
-  external (`ext_gate`), next to predictions and labels. Which view carried
-  which patient is a table, not a guess.
-- `history.tsv` - every loss component per epoch, so a gate that collapsed can
-  be told from a gate that was never pushed.
-- `expert_<view>.pth` / `moe_head.pth` - parts saved separately: probe an expert
-  alone, or re-use it as the next run's `pretrained:`.
-- `trials_metrics.tsv` - mean gate weight per view beside the score, which is how
-  you catch a model that scores well *because* the gate stopped routing.
+| file | what it answers |
+|---|---|
+| `pred.npz` | per-row gate weights, out-of-fold and external - which view carried which patient |
+| `history.tsv` | every loss component per epoch - a gate that collapsed vs one never pushed |
+| `expert_<view>.pth`, `moe_head.pth` | probe one expert alone, or re-use it as the next `pretrained:` |
+| `trials_metrics.tsv` | mean gate weight beside the score - catches a model that wins *because* the gate stopped routing |
