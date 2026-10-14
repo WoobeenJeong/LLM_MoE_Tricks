@@ -273,3 +273,5 @@ The point of a gate is that it is readable. What a run already leaves behind:
 - the trial table (`trials_metrics.tsv`) carries the mean gate weight per view
   alongside the score, which is how you catch a model that scores well *because*
   the gate stopped routing.
+
+<img src="docs/fig_gate_cancer.png" width="900">
