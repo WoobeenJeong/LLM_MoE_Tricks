@@ -48,8 +48,6 @@ optimize:
     loss.representation.weight: {type: float, low: 0.0, high: 0.5, step: 0.05}
 ```
 
-<img src="docs/fig_sampler_space.png" width="900">
-
 ---
 
 ## Run
@@ -210,6 +208,14 @@ inputs) plus the matching `expert_output_dims` in `MoEGate`.
 A third option nobody should skip considering: **no gate at all** (plain
 concatenation) as the baseline. If the gate does not beat it, the gate is
 decoration.
+
+---
+
+### Consideration for search space difference
+
+<img src="docs/fig_sampler_space.png" width="900">
+
+**Will edit soon**
 
 ---
 
