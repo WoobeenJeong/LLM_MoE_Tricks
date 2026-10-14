@@ -31,6 +31,16 @@ blocks.
 | representation loss | `ntxent` · `barlow_twins` · `vicreg`, weighted | `loss.representation` |
 | per-expert learning rate | one rate per view, or `expert_lr_scale: 0` to freeze all | `model.experts.<view>.lr` |
 
+**Notation used below.** Sample $n$ of a batch of size $B$, view $i$ of $N$
+views. $x_{ni}$ is the raw view, $h_{ni}$ the expert's representation,
+$g_{ni}$ the gate weight, $p_n$ the predicted probability, $y_n$ the label.
+The joint representation and the logit are
+
+$$
+z_n=\big[\,g_{n1}h_{n1}\;\Vert\;\cdots\;\Vert\;g_{nN}h_{nN}\,\big],\qquad
+\text{logit}_n=w^\top z_n+b .
+$$
+
 ## Experiment
 
 ![experiment](docs/experiment.png)
@@ -75,139 +85,175 @@ Each module runs its own self-check: `python moe_core.py`, `python moe_data.py`,
 
 ### Data contract
 
-One meta row = one modelled observation. Repeated measurements of the same
-subject (two flowcell libraries, two aliquots) are two rows sharing
-`subject_col`; they always travel together - same split, same CV fold, same
-batch - and the representation losses pair them up. A view that only exists per
-subject is broadcast onto both rows. Scoring averages the replicates back to one
-value per subject.
+One meta row = one observation. The same subject measured twice gives two rows
+sharing `subject_col`; they stay together in the same split, fold and batch, and
+the representation losses pair them. A view that exists only per subject is
+copied onto both rows. Scores are averaged back to one value per subject.
 
 ---
 
 ## Consideration for loss as statistical approach
 
+Total objective, every weight set in the YAML:
+
+$$
+\mathcal{L}=\mathcal{L}_{\text{task}}
++\lambda_{\text{aux}}\mathcal{L}_{\text{aux}}
++\lambda_{\text{imp}}\mathcal{L}_{\text{imp}}
++\lambda_{\text{ent}}\mathcal{L}_{\text{ent}}
++\lambda_{\text{rep}}\mathcal{L}_{\text{rep}}
+$$
+
 ### [for gate]
 
-The three gate terms are all **minimised** and all deliberately weak: at a scale
-of ~1 they dwarf a task loss of ~0.1 and pin every sample at a uniform gate,
-which looks like a working gate and is in fact a dead one.
+All three gate terms are **minimised**. They are deliberately small: at weight
+$\approx 1$ they are ten times the task loss and freeze every sample at
+$1/N$ - a gate that looks alive and says nothing.
 
 <img src="docs/fig_gate_entropy.png" width="900">
 
-**auxiliary loss** - the Switch-Transformer load balancer,
-`N * sum_i f_i * P_i`, where `f_i` is the fraction of samples whose top expert
-is `i` and `P_i` the mean gate probability of `i`. It is 1.0 at perfect balance.
-Unlike the importance term it couples the *hard* assignment to the *soft*
-probability, so it keeps pushing even when the mean gate already looks uniform.
+Write the batch-mean weight of view $i$ and its hard share as
 
-**gate importance loss** - squared deviation of the batch-mean gate from
-uniform. Pure anti-collapse and a weaker, smoother signal. With few experts and
-one shared classifier there is no capacity problem to solve, so this is usually
-the right term to start with.
+$$
+P_i=\frac{1}{B}\sum_n g_{ni},\qquad
+f_i=\frac{1}{B}\sum_n \mathbf{1}\!\left[\arg\max_j g_{nj}=i\right].
+$$
 
-**gate entropy loss** - mean per-sample entropy. Minimising it lets the gate
-*commit* per sample (towards 0/1 routing) while importance/auxiliary keep the
-global mix even. The two must be used together: entropy alone collapses to one
-expert for everybody, importance alone pins every sample at 1/N. An earlier
-version *maximised* entropy, which combined with importance held every sample at
-0.5/0.5 - a gate that cannot say anything about a patient.
+**auxiliary** (load balancing, Switch-Transformer):
 
-For the `sigmoid` gate the weights are not a distribution, so the entropy term
-becomes the mean per-expert **binary** entropy and the balance terms read the
-weights normalised to one.
+$$
+\mathcal{L}_{\text{aux}}=N\sum_{i} f_i P_i \;\;\ge 1,\quad =1 \text{ when balanced.}
+$$
+
+It multiplies the hard count by the soft probability, so it keeps pushing even
+when the average already looks even.
+
+**importance** (anti-collapse): squared distance of the mean weight from uniform,
+
+$$
+\mathcal{L}_{\text{imp}}=\sum_i\Big(P_i-\tfrac{1}{N}\Big)^2 .
+$$
+
+Smoother and weaker than `auxiliary`; the one to start with when $N$ is small.
+
+**entropy** (per-sample decisiveness):
+
+$$
+\mathcal{L}_{\text{ent}}=-\frac{1}{B}\sum_n\sum_i g_{ni}\log g_{ni}.
+$$
+
+Minimising it pushes each sample towards a one-hot route; `importance` keeps the
+cohort-level mix even. Use them **together**: entropy alone sends everyone to one
+expert, importance alone pins everyone at $1/N$. An earlier version *maximised*
+entropy - with importance on top, every sample sat at 50:50 (left panel above).
+
+For the `sigmoid` gate the weights are not a distribution, so entropy becomes the
+mean **binary** entropy per view and the balance terms use $g_{ni}/\sum_j g_{nj}$.
 
 ### [for feature]
 
-**triplet loss** - batch-hard triplet over the joint representation, using the
-binary label as the identity: the hardest same-label pair is pulled together and
-the hardest different-label pair pushed apart. It shapes the geometry rather
-than the decision value, so it keeps a BCE term alongside (`bce_weight`) or the
-classifier is free to drift out of calibration.
+**bce / wbce** - binary cross-entropy, optionally weighted:
 
-Class imbalance is handled either by the sampler (`balanced_sampler`, which
-resamples *subjects* so replicates stay together) or by **wbce**, whose
-`pos_weight` defaults to `n_neg / n_pos` of the training labels. Use one or the
-other - both at once double-counts the correction.
+$$
+\mathcal{L}_{\text{bce}}=-\frac{1}{B}\sum_n \big[\,c\,y_n\log p_n+(1-y_n)\log(1-p_n)\big],\qquad
+c=\frac{n_{\text{neg}}}{n_{\text{pos}}}\ \text{for \texttt{wbce}} .
+$$
+
+**focal** - down-weights the easy cases by $(1-p_t)^\gamma$ with
+$p_t=p_n$ if $y_n=1$ else $1-p_n$:
+
+$$
+\mathcal{L}_{\text{focal}}=-\frac{1}{B}\sum_n \alpha_t(1-p_t)^{\gamma}\log p_t .
+$$
+
+**triplet** - batch-hard, using the label as the identity:
+
+$$
+\mathcal{L}_{\text{tri}}=\frac{1}{B}\sum_n\Big[\max_{y_j=y_n}\lVert z_n-z_j\rVert-\min_{y_j\neq y_n}\lVert z_n-z_j\rVert+m\Big]_+ ,\qquad m=\text{margin}.
+$$
+
+It shapes distances, not the decision value, so a BCE term rides along
+(`bce_weight`) to keep the probability calibrated.
+
+Imbalance: use **either** `balanced_sampler` (resamples subjects, replicates
+stay together) **or** `wbce`. Both at once corrects twice.
 
 ### [for representation]
 
-These act on repeated measurements of one subject (flowcell A vs B): the same
-biology measured twice, so a representation that moves between A and B is
-measuring the library, not the patient. All three are computed on the
-gate-weighted joint representation and return exactly 0 when a batch holds no
-replicate pair.
+Same subject measured twice: anything that moves between the two measurements is
+the assay, not the patient. All three act on $z_n$ and return exactly $0$ when a
+batch holds no pair. Let $z^A,z^B$ be the two measurements of one subject.
 
 <img src="docs/fig_replicate.png" width="900">
 
-**NT-Xent** - contrastive: the replicate is the positive, every other sample in
-the batch a negative. Needs negatives, so it fights the task loss when batches
-are small; it also pulls apart two patients who genuinely look alike.
+**NT-Xent** - the replicate is the positive, the rest of the batch negatives,
+with cosine similarity $s$ and temperature $\tau$:
 
-**Barlow Twins** - cross-correlation of the two replicate batches towards the
-identity: diagonal 1 (invariant to the batch effect), off-diagonal 0
-(non-redundant dimensions). No negatives, so batch size matters far less - a
-real advantage on cohorts of ~100.
+$$
+\mathcal{L}_{\text{ntx}}=-\log\frac{\exp(s(z^A,z^B)/\tau)}{\sum_{m\neq A}\exp(s(z^A,z_m)/\tau)} .
+$$
 
-**VICReg** - invariance + variance + covariance, each with its own coefficient.
-The variance hinge is the part the other two lack: it explicitly forbids
-dimensional collapse instead of hoping the negatives prevent it, which is the
-failure mode to expect when the two replicates are *too* similar.
+Needs negatives, so small batches hurt; it also pushes apart two patients who are
+genuinely alike.
 
-Rule of thumb: start with Barlow Twins or VICReg when replicates are the only
-structure you have, NT-Xent when the batch is large enough for negatives to
-mean something.
+**Barlow Twins** - cross-correlation matrix $C$ of the two standardised
+measurements driven to the identity:
+
+$$
+\mathcal{L}_{\text{bt}}=\sum_i (1-C_{ii})^2+\lambda\sum_{i\neq j}C_{ij}^2 .
+$$
+
+No negatives, so batch size matters far less - the practical choice at $n\sim100$.
+
+**VICReg** - invariance + variance floor + decorrelation:
+
+$$
+\mathcal{L}_{\text{vic}}=\alpha\,\lVert z^A-z^B\rVert^2
++\beta\sum_{k}\big[1-\sqrt{\operatorname{Var}(z^{\cdot}_k)+\epsilon}\,\big]_+
++\gamma\sum_{k\neq l}\operatorname{Cov}(z^{\cdot})_{kl}^2 .
+$$
+
+The middle term is a hinge that *pays the model to stay spread out*, so VICReg
+resists the collapse that makes two measurements agree - visible as its wide
+scatter and low polarization in the figure.
+
+Rule of thumb: Barlow Twins or VICReg when replicates are the only structure you
+have, NT-Xent when the batch is big enough for negatives to mean something.
 
 ---
 
 ## Consideration for gate structure
 
-All four take the (standardised, LayerNormed) views and emit one weight per
-expert, with a learned temperature.
+All four read the standardised, LayerNormed views and emit one weight per view.
+With $u_n=W[x_{n1}\Vert\cdots\Vert x_{nN}]+b$ and a learned temperature
+$\tau=\operatorname{softplus}(\theta)$:
 
 <img src="docs/fig_gate_structure.png" width="900">
 
-**sigmoid** - one linear layer, an *independent* weight per expert. The weights
-do not sum to 1, so experts can be on or off together: a soft ensemble, not a
-routing decision. Use it when the views are complementary rather than
-competing - nothing forces the model to spend a fixed budget of attention.
+| gate | weight | reads as |
+|---|---|---|
+| `sigmoid` | $g_{ni}=\sigma(u_{ni}/\tau)$ | independent switches, $\sum_i g_{ni}\neq 1$ - a soft ensemble |
+| `softmax` | $g_{n}=\operatorname{softmax}(u_n/\tau)$ | a share out of 100% - the usual MoE, and the one that quotes cleanly |
+| `gumbel` | $g_n=\operatorname{softmax}((u_n+\varepsilon)/\tau)$, $\varepsilon\sim$ Gumbel (train only) | a near-discrete pick; the noise also regularises a small cohort |
+| `attention` | $c_{ni}=\tanh(W_ix_{ni})\odot\sigma(V_ix_{ni})$, then $g_n=\operatorname{softmax}(W_c[c_{n1}\Vert\cdots])$ | weighs *parts* of a view first - survives signal buried in thousands of features, at the cost of parameters |
 
-**softmax** - one linear layer, a simplex over the experts. The usual MoE: the
-views compete, and the weight reads directly as "how much of this call came from
-OMICS_01". That interpretability is the reason to prefer it when the gate itself
-is the result you want to report.
-
-**gumbel softmax** - softmax with Gumbel noise while training, plain softmax at
-eval. Pushes towards a near-discrete choice without losing gradients. Worth it
-when you believe one view is *right* per patient and the soft average is
-blurring two mechanisms into one; the noise also regularises a gate that would
-otherwise memorise a small cohort.
-
-**attentioned gate** - per view a gated-tanh block (`tanh(Wx) * sigmoid(Vx)`,
-the MoME gate), concatenated, then one linear layer and a softmax. The gate can
-weigh *parts* of a view before deciding, so it survives a view whose relevant
-signal is a handful of features drowned in thousands. Costs parameters, which on
-a small cohort is exactly the risk.
+Choose by what you want to claim: `softmax` if the weight itself is the result,
+`gumbel` if you believe one view is right per patient, `sigmoid` if the views are
+complementary rather than competing, `attention` if a view is mostly noise.
 
 ### gate for input feature vs hidden dimension
 
-**Currently implemented: input-feature gating.** The gate reads the raw views, so
-the routing decision is a statement about the *data* ("this patient's OMICS_02 is
-informative"), independent of how well each expert happens to be trained at that
-moment. That is what makes the gate weight quotable as a result, and it is the
-only option when an expert is a frozen black box.
+**Implemented: input-feature gating**, $g_n=\text{gate}(x_n)$. The routing is a
+statement about the *data*, independent of how well each expert is trained, which
+is what makes the weight quotable - and the only option for a frozen expert.
 
-**Hidden-dimension gating** - the gate reads the expert representations instead
-(`h_i` rather than `x_i`) - is the alternative worth testing. It lets the gate
-react to what an expert actually extracted, which is strictly more informative,
-but it couples gate and expert training: an expert that starts badly gets
-down-weighted, trains less, and stays bad. On a small cohort that feedback loop
-is the thing to watch. *Not implemented yet*; it is a change of one argument at
-`MoE.forward_with_rep` (feed `feats` to the gate instead of the normalised
-inputs) plus the matching `expert_output_dims` in `MoEGate`.
+**Hidden-dimension gating**, $g_n=\text{gate}(h_n)$, is the alternative: more
+informative, but gate and expert now train each other. A weak expert gets
+down-weighted, trains less, stays weak. *Not implemented*: feed `feats` to the
+gate in `MoE.forward_with_rep` and size `MoEGate` by `expert_output_dims`.
 
-A third option nobody should skip considering: **no gate at all** (plain
-concatenation) as the baseline. If the gate does not beat it, the gate is
-decoration.
+Baseline worth keeping: **no gate** (plain concatenation). If the gate does not
+beat it, the gate is decoration.
 
 ---
 
@@ -215,15 +261,28 @@ decoration.
 
 <img src="docs/fig_sampler_space.png" width="900">
 
-**Will edit soon**
+Four ways to pick the next trial $x^{(t)}$ from the search space $\mathcal{X}$,
+given the trials already scored, $\mathcal{D}=\{(x^{(s)},y^{(s)})\}_{s<t}$:
+
+| sampler | what it assumes / samples from | in one line |
+|---|---|---|
+| `Random` | $x^{(t)}\sim\mathrm{Uniform}(\mathcal{X})$, independent of $\mathcal{D}$ | no model at all - covers the box evenly, never zooms in |
+| `TPE` | splits trials at a quantile $y^\ast$ and fits two densities, $\ell(x)=p(x\mid y>y^\ast)$ and $g(x)=p(x\mid y\le y^\ast)$; samples where $\ell(x)/g(x)$ is large | density ratio, not a surface - cheap, and it concentrates fast |
+| `GP` | $f\sim\mathcal{GP}(\mu,k)$, so the posterior gives $\mu_t(x)$ and $\sigma_t(x)$; picks $\arg\max_x \mathbb{E}\big[(f(x)-f^\ast)_+\big]$ | one smooth surface with error bars - spends trials on the corners it has not seen |
+| `CmaEs` | $x^{(t)}\sim\mathcal{N}\!\left(m_t,\sigma_t^2 C_t\right)$, with $m_t,C_t$ re-estimated from the best trials | an ellipse that walks downhill - tight, and blind to anything outside it |
+
+The density panels show exactly that: `Random` fills the box, `TPE` collapses
+onto one peak, `GP` keeps probing the edges, `CmaEs` draws one elongated cloud.
+Best objective was reached by `GP` on OMICS1 and by `TPE` on OMICS2 - with 42
+trials the ranking is not stable enough to call a winner.
 
 ---
 
 ## Consideration for expert (+ transfer learning)
 
-Experts are built from scratch or loaded from a `.pth` - TorchScript, a pickled
-module, or a `state_dict` bundle. A loaded expert can be kept frozen, partially
-unfrozen, or fine-tuned whole.
+Experts are built from scratch or loaded from a `.pth` (TorchScript, pickled
+module, or `state_dict`). A loaded expert can stay frozen, open partly, or
+fine-tune whole.
 
 ### how many layers should be open / freeze
 
@@ -231,47 +290,40 @@ unfrozen, or fine-tuned whole.
 
 | value | effect | when |
 |---|---|---|
-| `0` | fully frozen; only gate + classifier learn | the expert was trained on far more data than this cohort has; you want the gate's contribution isolated |
-| `1`–`2` | the head (and the last block) adapt | the representation transfers but the decision boundary does not - the usual case across sites/protocols |
-| larger `n` | progressively deeper adaptation | the input distribution itself shifted (different assay, different depth) |
-| `-1` | everything trains | enough data, or the pretrained weights are only an initialisation |
+| `0` | frozen; only gate + classifier learn | the expert saw far more data than this cohort; you want the gate's contribution isolated |
+| `1`–`2` | head (and last block) adapt | the representation transfers, the decision boundary does not - the usual cross-site case |
+| larger `n` | deeper adaptation | the input distribution itself shifted (assay, depth) |
+| `-1` | everything trains | enough data, or the weights are only an initialisation |
 
-Three things the code enforces so the choice means what you think it means:
+What the code enforces so the choice means what you think:
 
-- a frozen expert is held in **eval mode**, so its dropout and BatchNorm running
-  statistics do not keep moving while "only the gate learns";
-- frozen parameters contribute **no optimiser group**, so weight decay cannot
-  quietly shrink them;
-- each expert keeps **its own learning rate** - a single shared rate cannot serve
-  a transformer that wants ~3e-3 and an MLP that wants ~6e-4, and a tail being
-  fine-tuned usually wants an order of magnitude less than the gate being
-  trained from scratch.
+- a frozen expert sits in **eval mode** - its dropout and BatchNorm statistics
+  stop moving while "only the gate learns";
+- frozen parameters get **no optimiser group** - weight decay cannot shrink them;
+- each expert keeps **its own learning rate**; a tail being fine-tuned usually
+  wants an order of magnitude less than a gate trained from scratch.
 
-`train.expert_lr_scale: 0` freezes every expert at once regardless of
-`unfreeze_last_n` - the cheapest "is the gate doing anything?" ablation.
+`train.expert_lr_scale: 0` freezes every expert at once - the cheapest "is the
+gate doing anything?" ablation.
 
-Warm-starting inside cross-validation is where leakage hides: an expert
-pretrained on the full development set has already seen the held-out fold.
-Either the pretrained weights come from outside the cohort entirely, or you need
-fold-specific checkpoints. Nothing in the code can detect this for you.
+**Leakage warning.** An expert pretrained on the whole development set has
+already seen the held-out fold. Either pretrain outside the cohort, or keep
+fold-specific checkpoints. The code cannot detect this.
 
 ---
 
 ## Consideration for explainability
 
-The point of a gate is that it is readable. What a run already leaves behind:
+A gate is worth having only if it is readable. What one run leaves behind:
 
 <img src="docs/fig_gate_cancer.png" width="900">
 
-- `pred.npz` - per-row **gate weights** for every development row
-  (out-of-fold, `dev_gate_oof`) and every external row (`ext_gate`), next to the
-  predictions and labels. Which view carried which patient is a table, not a
-  guess.
-- `history.tsv` - the per-epoch value of *every* loss component separately, so a
-  gate that collapsed can be told apart from a gate that was never pushed.
-- `expert_<view>.pth` / `moe_head.pth` - the parts saved independently, so an
-  expert can be lifted out and probed on its own, or re-used as the
-  `pretrained:` of the next run.
-- the trial table (`trials_metrics.tsv`) carries the mean gate weight per view
-  alongside the score, which is how you catch a model that scores well *because*
-  the gate stopped routing.
+- `pred.npz` - per-row **gate weights**, out-of-fold (`dev_gate_oof`) and
+  external (`ext_gate`), next to predictions and labels. Which view carried
+  which patient is a table, not a guess.
+- `history.tsv` - every loss component per epoch, so a gate that collapsed can
+  be told from a gate that was never pushed.
+- `expert_<view>.pth` / `moe_head.pth` - parts saved separately: probe an expert
+  alone, or re-use it as the next run's `pretrained:`.
+- `trials_metrics.tsv` - mean gate weight per view beside the score, which is how
+  you catch a model that scores well *because* the gate stopped routing.
